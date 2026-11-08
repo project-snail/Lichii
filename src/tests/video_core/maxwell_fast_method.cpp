@@ -837,3 +837,29 @@ TEST_CASE("Maxwell3D's split front uploads macro code sent as one multi-method r
     REQUIRE(macros.native_write_offset == pointer * 3 + code.size());
     CHECK(std::equal(code.begin(), code.end(), macros.native_code.begin() + pointer * 3));
 }
+
+TEST_CASE("Split release mirror keeps what the front sent", "[video_core][gpu_split_dependencies]") {
+    VideoCommon::GpuSplit split;
+    split.ClearReleaseMirror();
+    REQUIRE_FALSE(split.MirroredRelease(0x1000).has_value());
+
+    split.MirrorRelease(0x1000, 7);
+    REQUIRE(split.MirroredRelease(0x1000) == 7u);
+    split.MirrorRelease(0x1000, 9);
+    REQUIRE(split.MirroredRelease(0x1000) == 9u);
+    split.MirrorRelease(0x2000, 3);
+    REQUIRE(split.MirroredRelease(0x2000) == 3u);
+
+    // A compute or copy can lower a mirrored word again: NoteWriter drops the mirror.
+    split.NoteWriter();
+    REQUIRE_FALSE(split.MirroredRelease(0x1000).has_value());
+
+    // A full mirror is cleared rather than trimmed, so nothing stale answers an acquire.
+    for (u32 i = 0; i < 16; ++i) {
+        split.MirrorRelease(0x10000 + u64{i} * 0x10, i);
+    }
+    REQUIRE(split.MirroredRelease(0x10010) == 1u);
+    split.MirrorRelease(0x30000, 42);
+    REQUIRE(split.MirroredRelease(0x30000) == 42u);
+    REQUIRE_FALSE(split.MirroredRelease(0x10010).has_value());
+}

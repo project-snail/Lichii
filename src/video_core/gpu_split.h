@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <type_traits>
 
@@ -161,6 +162,8 @@ public:
     /// Compute or copy work was just sent: what can write GPU-written command lists.
     void NoteWriter() {
         last_writer_position = write_position;
+        // That work can also write (and lower) a semaphore word the release mirror holds.
+        ClearReleaseMirror();
     }
     /// Waits until the back executed the compute and copy work sent so far (not what came after).
     /// Returns whether any of it was still queued.
@@ -174,6 +177,37 @@ public:
     /// Waits until the back executed the work sent before the last NoteSync. Returns whether any
     /// of it was still queued.
     bool WaitForSync();
+
+    /// A release this thread sent: the value the semaphore word at `address` holds once the back
+    /// has run it. Entries run in ring order, so an acquire this mirror already meets is met
+    /// before anything the channel sends after it, and the front does not have to drain for it.
+    /// Releases from compute, copies and shaders are not mirrored; NoteWriter clears what is,
+    /// because those writes can lower a word again.
+    void MirrorRelease(GPUVAddr address, u32 value) {
+        for (size_t i = 0; i < release_mirror_count; ++i) {
+            if (release_mirror[i].address == address) {
+                release_mirror[i].value = value;
+                return;
+            }
+        }
+        if (release_mirror_count == release_mirror.size()) {
+            // Full: keep nothing rather than answer from entries that may have gone stale.
+            release_mirror_count = 0;
+        }
+        release_mirror[release_mirror_count++] = {address, value};
+    }
+    /// What MirrorRelease last recorded for `address`, if the mirror still holds an entry for it.
+    [[nodiscard]] std::optional<u32> MirroredRelease(GPUVAddr address) const {
+        for (size_t i = 0; i < release_mirror_count; ++i) {
+            if (release_mirror[i].address == address) {
+                return release_mirror[i].value;
+            }
+        }
+        return std::nullopt;
+    }
+    void ClearReleaseMirror() {
+        release_mirror_count = 0;
+    }
 
 private:
     friend struct GpuSplitTestAccess;
@@ -247,6 +281,14 @@ private:
     u64 write_position{};
     u64 last_writer_position{};
     u64 last_sync_position{};
+    /// Seen releases (MirrorRelease): the acquire fast path answers from here instead of
+    /// draining. Small on purpose; a full mirror is cleared rather than trimmed.
+    struct ReleaseMirrorEntry {
+        GPUVAddr address;
+        u32 value;
+    };
+    std::array<ReleaseMirrorEntry, 16> release_mirror{};
+    size_t release_mirror_count{};
     u64 published_local{};
     u64 consumed_cache{};
     /// Words between publishes: small right after a drain, while the back has nothing to do.
